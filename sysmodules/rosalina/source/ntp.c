@@ -43,6 +43,8 @@
 #define NTP_IP              MAKE_IPV4(51, 137, 137, 111) // time.windows.com
 #endif
 
+#define NTP_TIMEOUT_MS      5000
+
 // From https://github.com/lettier/ntpclient/blob/master/source/c/main.c
 
 typedef struct NtpPacket
@@ -87,9 +89,10 @@ Result ntpGetTimeStamp(u64 *msSince1900, u64 *samplingTick)
         return res;
 
     int sock = socSocket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < -10000) {
+    if (sock < 0) {
         // Socket services broken
-        return sock;
+        miniSocExit();
+        return sock < -10000 ? sock : -1;
     }
 
     struct sockaddr_in servAddr = {0}; // Server address data structure.
@@ -117,7 +120,13 @@ Result ntpGetTimeStamp(u64 *msSince1900, u64 *samplingTick)
     if(socSend(sock, &packet, sizeof(NtpPacket), 0) < 0)
         goto cleanup;
 
-    if(socRecv(sock, &packet, sizeof(NtpPacket), 0) < 0)
+    // soc doesn't support SO_RCVTIMEO: wait for the reply with poll so that a network
+    // without internet access doesn't hang the menu forever (#2195)
+    struct pollfd pfd = { .fd = sock, .events = POLLIN, .revents = 0 };
+    if(socPoll(&pfd, 1, NTP_TIMEOUT_MS) <= 0 || !(pfd.revents & POLLIN))
+        goto cleanup;
+
+    if(socRecv(sock, &packet, sizeof(NtpPacket), 0) < (ssize_t)sizeof(NtpPacket))
         goto cleanup;
     roundTripTicks = svcGetSystemTick() - roundTripTicks;
     u64 dt = 1000 * 1000 * roundTripTicks / (2 * SYSCLOCK_ARM11); // avg = round trip time / 2
@@ -182,7 +191,7 @@ static Result ntpSetTimeDateImpl(u64 msSince1900, u64 samplingTick, bool syncRtc
         if (msY2k % 1000u != 0)
         {
             u64 dt2 = 1000u - msY2k % 1000u;
-            svcSleepThread(dt2);
+            svcSleepThread(dt2 * 1000 * 1000); // ms -> ns
             msY2k += dt2;
         }
         if (R_SUCCEEDED(res)) res = PTMSYSM_SetRtcTime(msY2k);

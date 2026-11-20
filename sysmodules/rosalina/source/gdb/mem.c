@@ -199,31 +199,43 @@ u32 GDB_SearchMemory(bool *found, GDBContext *ctx, u32 addr, u32 len, const void
 {
     u8 buf[0x1000 + 0x1000 * ((GDB_BUF_LEN + 0xFFF) / 0x1000)];
     u32 maxNbPages = 1 + ((GDB_BUF_LEN + 0xFFF) / 0x1000);
-    u32 curAddr = addr;
+    u32 endAddr = addr + len < addr ? 0xFFFFFFFF : addr + len;
+    u32 curAddr = addr;             // lowest address where a match can still start
+    u32 addrBase = addr & ~0xFFF;   // address of buf[0]
+    u32 nbKeptPages = 0;            // pages already in buf from the previous window
+
+    *found = false;
+    if(patternLen == 0 || patternLen > len)
+        return 0;
 
     s64 TTBCR;
     svcGetSystemInfo(&TTBCR, 0x10002, 0);
-    while(curAddr < addr + len)
+    while(curAddr < endAddr)
     {
         u32 nbPages;
-        u32 addrBase = curAddr & ~0xFFF, addrDispl = curAddr & 0xFFF;
-
-        for(nbPages = 0; nbPages < maxNbPages; nbPages++)
+        for(nbPages = nbKeptPages; nbPages < maxNbPages; nbPages++)
         {
-            if(addr >= (1u << (32 - (u32)TTBCR)))
+            u32 pageAddr = addrBase + nbPages * 0x1000;
+            if(pageAddr >= (1u << (32 - (u32)TTBCR)))
             {
-                u32 PA = svcConvertVAToPA((const void *)addr, false);
+                u32 PA = svcConvertVAToPA((const void *)pageAddr, false);
                 if(PA == 0 || (PA >= 0x10000000 && PA <= 0x18000000))
                     break;
             }
 
-            if(R_FAILED(GDB_ReadTargetMemoryInPage(buf + 0x1000 * nbPages, ctx, addrBase + nbPages * 0x1000, 0x1000)))
+            if(R_FAILED(GDB_ReadTargetMemoryInPage(buf + 0x1000 * nbPages, ctx, pageAddr, 0x1000)))
                 break;
         }
 
+        // Only look at bytes inside [addr, addr + len)
+        u32 addrDispl = curAddr - addrBase;
+        u32 avail = 0x1000 * nbPages > addrDispl ? 0x1000 * nbPages - addrDispl : 0;
+        u32 remaining = endAddr - curAddr;
+        u32 searchLen = avail < remaining ? avail : remaining;
+
         u8 *pos = NULL;
-        if(addrDispl + patternLen <= 0x1000 * nbPages)
-            pos = memsearch(buf + addrDispl, pattern, 0x1000 * nbPages - addrDispl, patternLen);
+        if(patternLen <= searchLen)
+            pos = memsearch(buf + addrDispl, pattern, searchLen, patternLen);
 
         if(pos != NULL)
         {
@@ -231,10 +243,32 @@ u32 GDB_SearchMemory(bool *found, GDBContext *ctx, u32 addr, u32 len, const void
             return addrBase + (pos - buf);
         }
 
-        curAddr = addrBase + 0x1000;
+        if(remaining <= avail)
+            break;
+
+        u32 nextBase;
+        if(nbPages < maxNbPages)
+        {
+            // Skip the page that couldn't be read
+            nextBase = addrBase + 0x1000 * (nbPages + 1);
+            curAddr = nextBase;
+            nbKeptPages = 0;
+        }
+        else
+        {
+            // Keep the last page instead of reading it again: a match can still start
+            // in its last patternLen - 1 bytes (patternLen <= GDB_BUF_LEN < 0x1000)
+            nextBase = addrBase + 0x1000 * (maxNbPages - 1);
+            curAddr = curAddr + avail - (patternLen - 1);
+            memcpy(buf, buf + 0x1000 * (maxNbPages - 1), 0x1000);
+            nbKeptPages = 1;
+        }
+
+        if(nextBase <= addrBase) // wrapped around
+            break;
+        addrBase = nextBase;
     }
 
-    *found = false;
     return 0;
 }
 
@@ -287,11 +321,12 @@ GDB_DECLARE_HANDLER(WriteMemoryRaw)
     if(dataStart + len >= ctx->buffer + 4 + GDB_BUF_LEN)
         return GDB_ReplyErrno(ctx, ENOMEM);
 
+    // The payload is escaped: pass its escaped length, which runs up to the end of the command
     u8 data[GDB_BUF_LEN];
-    u32 n = GDB_UnescapeBinaryData(data, dataStart, len);
+    u32 n = GDB_UnescapeBinaryData(data, dataStart, ctx->commandEnd - dataStart);
 
     if(n != len)
-        return GDB_ReplyErrno(ctx, n);
+        return GDB_ReplyErrno(ctx, EILSEQ);
 
     return GDB_WriteMemory(ctx, data, addr, len);
 }
@@ -322,7 +357,7 @@ GDB_DECLARE_QUERY_HANDLER(SearchMemory)
 
     patternLen = GDB_UnescapeBinaryData(pattern, patternStart, patternLen);
 
-    foundAddr = GDB_SearchMemory(&found, ctx, addr, len, patternStart, patternLen);
+    foundAddr = GDB_SearchMemory(&found, ctx, addr, len, pattern, patternLen);
 
     if(found)
         return GDB_SendFormattedPacket(ctx, "1,%x", foundAddr);

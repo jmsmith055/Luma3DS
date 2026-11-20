@@ -51,6 +51,19 @@ static inline void *decodeArmBranch(const void *src)
 }
 
 // For Arm prologs in the form of: push {regs} ... sub sp, #off (this obviously doesn't intend to cover all cases)
+// Returns the first B/BL (any condition but "never") within maxWords words of src, or src itself if there is none
+static inline const u32 *findNextArmBranch(const u32 *src, u32 maxWords)
+{
+    for(u32 i = 0; i < maxWords; i++)
+    {
+        u32 instr = src[i];
+        if((instr & 0x0E000000) == 0x0A000000 && (instr >> 28) != 0xF)
+            return src + i;
+    }
+
+    return src;
+}
+
 static inline u32 computeArmFrameSize(const u32 *prolog)
 {
     const u32 *off;

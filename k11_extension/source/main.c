@@ -270,10 +270,13 @@ static void findUsefulSymbols(void)
     for(off = (u32 *)KProcessHwInfo__MapListOfKBlockInfo; *off != 0xE1A0000B; ++off);
     doControlMemory = (Result (*)(KProcessHwInfo*, u32, u32, u32, u32, u32, u32, u32))decodeArmBranch(off + 1);
 
+    // These are only called when the mutex is contended, so a wrong pointer here crashes much later (#2307).
+    // Don't assume the branch immediately follows the pattern: use the next actual branch instruction.
     for(off = (u32 *)officialSVCs[0x7C]; *off != 0x03530000; off++);
-    KObjectMutex__WaitAndAcquire = (void (*)(KObjectMutex *))decodeArmBranch(++off);
+    off = (u32 *)findNextArmBranch(off + 1, 4);
+    KObjectMutex__WaitAndAcquire = (void (*)(KObjectMutex *))decodeArmBranch(off);
     for(; *off != 0xE320F000; off++);
-    KObjectMutex__ErrorOccured = (void (*)(void))decodeArmBranch(off + 1);
+    KObjectMutex__ErrorOccured = (void (*)(void))decodeArmBranch(findNextArmBranch(off + 1, 4));
 
     for(off = (u32 *)originalHandlers[4]; *off != (u32)exceptionStackTop; off++);
     kernelUsrCopyFuncsStart = (void *)off[1];

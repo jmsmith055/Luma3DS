@@ -36,6 +36,9 @@ u8 *memsearch(u8 *startPos, const void *pattern, u32 size, u32 patternSize)
     const u8 *patternc = (const u8 *)pattern;
     u32 table[256];
 
+    // Avoid the unsigned underflows below, which would read far out of bounds
+    if(patternSize == 0 || patternSize > size) return NULL;
+
     //Preprocessing
     for(u32 i = 0; i < 256; i++)
         table[i] = patternSize;
